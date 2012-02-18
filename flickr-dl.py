@@ -11,10 +11,12 @@ import re
 import os
 import time
 import urllib2
-import flickr
 import datetime
+import optparse
+import sys
 from threading import Thread, Lock
 
+import flickr
 
 class UrlFetcher(object):
     
@@ -37,19 +39,18 @@ class UrlFetcher(object):
 
 class DownloadPhoto(object):
 
-    def __init__(self, save_dir=None, http_proxy=None):
+    def __init__(self, http_proxy=None):
         self.fetcher = UrlFetcher(http_proxy=http_proxy)
-        self.save_dir = save_dir
         
-    def download(self, photo):
+    def download(self, task):
         msg = ''
         try:
-            photo_large_url = photo.getLarge()
+            photo_large_url = task.photo.getLarge()
         except Exception, e:
             msg = 'Error:%s' % e
             return msg
         photo_name = photo_large_url[photo_large_url.rfind('/')+1:]
-        photo_path = os.path.join(self.save_dir, photo_name)
+        photo_path = os.path.join(task.save_dir, photo_name)
         if os.path.exists(photo_path):
             msg = 'Path Exist:%s' % photo_path
             return msg
@@ -67,8 +68,12 @@ class DownloadPhoto(object):
         
         return msg
             
+class Task(object):
+    def __init__(self, save_dir, photo):
+        self.save_dir = save_dir
+        self.photo = photo
 
-class TaskQueue:
+class TaskQueue(object):
     
     def __init__(self):
         self.stack = []
@@ -160,48 +165,59 @@ class TaskQueue:
     
 class DownloadThread(Thread):
     
-    def __init__(self, task_queue, photo_dir, name=None):
+    def __init__(self, task_queue, name=None):
         Thread.__init__(self, name=name)
-        self.downloader = DownloadPhoto(photo_dir)
+        self.downloader = DownloadPhoto()
         self.task_queue = task_queue
         
     def run(self):
         while True:
-            photo = self.task_queue.get()
+            task = self.task_queue.get()
             
-            if photo is None:
+            if task is None:
                 return
-            elif photo == -1:
+            elif task == -1:
                 time.sleep(0.1)
                 continue
 
-            msg = self.downloader.download(photo)
+            msg = self.downloader.download(task)
             self.task_queue.finish_one(msg)
 
 class FlickrDL:
     
-    def __init__(self, photo_dir, thread_num=5):
+    def __init__(self, photo_dir, start_day, end_day, thread_num=5):
         self.task_queue = TaskQueue()
         self.threads = []
         self.thread_num = thread_num
+        self.photo_dir = photo_dir
+        self.start_day = start_day
+        self.end_day = end_day
+
         for i in range(self.thread_num):
-            thread = DownloadThread(self.task_queue, photo_dir, '[%d]' % i)
+            thread = DownloadThread(self.task_queue, '[%d]' % i)
             self.threads.append(thread)
             thread.start()
             
-    def dl_photos(self, count):
-        times = (count + 499) / 500
-        start_day = datetime.date(2012,2,10)
+    def dl_photos(self):
+        current_day = self.start_day
         delta = datetime.timedelta(days=1)
-        for t in range(times):
-            date = (start_day - delta * t).strftime("%Y-%m-%d")
+        while current_day <= self.end_day:
+            date = current_day.strftime('%Y-%m-%d')
+            save_dir = os.path.join(self.photo_dir, date)
+            if not os.path.exists(save_dir):
+                os.mkdir(save_dir)
+
             try:
                 photos = flickr.interestingness(date, 1, 500) 
                 #self.task_queue.put_list(photos)
             except Exception,e:
                 print e
             else:
-                self.task_queue.put_list(photos)
+                tasks = []
+                for photo in photos:
+                    tasks.append(Task(save_dir, photo))
+                self.task_queue.put_list(tasks)
+            current_day += delta
     
     def wait_thread_done(self):
         self.task_queue.join()
@@ -212,13 +228,29 @@ class FlickrDL:
             thread.join()
             
 if __name__ == '__main__':
-    #d = downloadMap('gmap')
-    d = FlickrDL('./photos', 10)
+    parser = optparse.OptionParser()
+    parser.add_option('-d', type='string', dest='photo_dir', help='save photos directory')
+    parser.add_option('-s', type='string', dest='start_day', help='start day,like: 2012-02-24')
+    parser.add_option('-e', type='string', dest='end_day', help='end day')
+    (options, args) = parser.parse_args()
+    if options.photo_dir is None:
+        print 'must have photo_dir -d'
+        parser.print_help()
+        sys.exit()        
+    elif options.start_day is None:
+        print 'must have start_day -s'
+        parser.print_help()
+        sys.exit()        
+    elif options.end_day is None:
+        print 'must have end_day -e'
+        parser.print_help()
+        sys.exit()        
     
-    d.dl_photos(2000)
-    d.wait_thread_done()
-    d.stop_all()
-#    for thread in d.threads:
-#        thread.join()
-    
-    
+    start_day = datetime.datetime.strptime(options.start_day, '%Y-%m-%d')
+    end_day = datetime.datetime.strptime(options.end_day, '%Y-%m-%d')
+
+    flickr_dl = FlickrDL(options.photo_dir, start_day, end_day, 10)
+    flickr_dl.dl_photos()
+    flickr_dl.wait_thread_done()
+    flickr_dl.stop_all()
+
